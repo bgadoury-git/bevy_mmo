@@ -3,8 +3,11 @@ name = "bevy_mmo"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+dev-dynamic = ["bevy/dynamic_linking"]
+
 [dependencies]
-bevy = { version = "0.18.1", features = ["dynamic_linking"] }
+bevy = { version = "0.18.1", default-features = true, optional = false }
 avian2d = { git = "https://github.com/avianphysics/avian", branch = "main" }
 rand = "0.8.5"
 

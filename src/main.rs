@@ -1,9 +1,7 @@
 mod plugin;
 
 use bevy::{
-    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
-    prelude::*,
-    window::PresentMode,
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin}, math::VectorSpace, prelude::*, window::PresentMode
 };
 use avian2d::{math::*, prelude::*};
 use plugin::*;
@@ -13,8 +11,8 @@ const PLAYER_START: Vec3 = Vec3::ZERO;
 const PLAYER_SIZE: f32 = 24.0;
 const PLAYER_JUMP_IMPULSE: f32 = 120.0;
 const PLAYER_GRAVITY_SCALE: f32 = 4.0;
-const BOX_COUNT: usize = 12;
-const BOX_SIZE: f32 = 40.0;
+const BOX_COUNT: usize = 15000;
+const BOX_SIZE: f32 = 4.0;
 const BOX_SPAWN_RADIUS: f32 = 500.0;
 const BOX_RESTITUTION: f32 = 0.7;
 const FLOOR_RESTITUTION: f32 = 0.7;
@@ -41,10 +39,11 @@ fn main() {
             FrameTimeDiagnosticsPlugin::default(),
             PhysicsPlugins::default().with_length_unit(20.0),
             CharacterControllerPlugin))
+        .init_resource::<BoxVelocityTimer>()
         .add_systems(Startup, (setup_camera, setup_player_stats_ui, setup_fps_ui))
         .add_systems(Startup, (add_player, spawn_boxes, spawn_floor))
-        .add_systems(Update, update_fps_ui)
-        .add_systems(PostUpdate, (follow_player_camera, update_player_stats_ui))
+        .add_systems(Update, (update_fps_ui, apply_random_impulse_to_boxes))
+        .add_systems(PostUpdate, (update_player_stats_ui))
         .run();
 }
 
@@ -141,7 +140,8 @@ fn spawn_boxes(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mat
             RigidBody::Dynamic,
             Collider::rectangle(BOX_SIZE, BOX_SIZE),
             Restitution::new(BOX_RESTITUTION).with_combine_rule(CoefficientCombine::Max),
-            Transform::from_xyz(PLAYER_START.x + offset.x, PLAYER_START.y + offset.y, -0.1),
+            Transform::from_xyz(PLAYER_START.x + offset.x, PLAYER_START.y + offset.y, 0.0),
+            LinearVelocity::default(),
         ));
     }
 }
@@ -153,11 +153,75 @@ fn spawn_floor(mut commands: Commands, _meshes: ResMut<Assets<Mesh>>, _materials
             custom_size: Some(Vec2::new(1000.0, 10.0)),
             ..default()
         },
-        Transform::from_xyz(0.0, -110.0, 0.0),
+        Transform::from_xyz(0.0, -500.0, 0.0),
         RigidBody::Static,
         Collider::rectangle(1000.0, 10.0),
         Restitution::new(FLOOR_RESTITUTION).with_combine_rule(CoefficientCombine::Max),
     ));
+
+    commands.spawn((
+        Sprite {
+            color: Color::srgb(0.7, 0.7, 0.8),
+            custom_size: Some(Vec2::new(1000.0, 10.0)),
+            ..default()
+        },
+        Transform::from_xyz(0.0, 500.0, 0.0),
+        RigidBody::Static,
+        Collider::rectangle(1000.0, 10.0),
+        Restitution::new(FLOOR_RESTITUTION).with_combine_rule(CoefficientCombine::Max),
+    ));
+
+    commands.spawn((
+        Sprite {
+            color: Color::srgb(0.7, 0.7, 0.8),
+            custom_size: Some(Vec2::new(10.0, 1000.0)),
+            ..default()
+        },
+        Transform::from_xyz(500.0, 0.0, 0.0),
+        RigidBody::Static,
+        Collider::rectangle(10.0, 1000.0),
+        Restitution::new(FLOOR_RESTITUTION).with_combine_rule(CoefficientCombine::Max),
+    ));
+
+    commands.spawn((
+        Sprite {
+            color: Color::srgb(0.7, 0.7, 0.8),
+            custom_size: Some(Vec2::new(10.0, 1000.0)),
+            ..default()
+        },
+        Transform::from_xyz(-500.0, 0.0, 0.0),
+        RigidBody::Static,
+        Collider::rectangle(10.0, 1000.0),
+        Restitution::new(FLOOR_RESTITUTION).with_combine_rule(CoefficientCombine::Max),
+    ));
+}
+
+#[derive(Resource)]
+struct BoxVelocityTimer(Timer);
+
+impl Default for BoxVelocityTimer {
+    fn default() -> Self {
+        Self(Timer::from_seconds(rand::thread_rng().gen_range(1.0..5.0), TimerMode::Once))
+    }
+}
+
+fn apply_random_impulse_to_boxes(
+    mut timer: ResMut<BoxVelocityTimer>,
+    time: Res<Time>,
+    mut box_query: Query<&mut LinearVelocity, With<WorldBox>>,
+) {
+    timer.0.tick(time.delta());
+    if !timer.0.just_finished() {
+        return;
+    }
+
+    let mut rng = rand::thread_rng();
+    for mut velocity in &mut box_query {
+        velocity.x = rng.gen_range(-100.0..100.0);
+        velocity.y = rng.gen_range(-100.0..100.0);
+    }
+
+    timer.0 = Timer::from_seconds(rng.gen_range(1.0..5.0), TimerMode::Once);
 }
 
 fn update_player_stats_ui(
