@@ -48,7 +48,7 @@ struct Player;
 struct WorldBox;
 
 #[derive(Component)]
-struct Name(String);
+struct PlayerName(String);
 
 #[derive(Component)]
 struct Health(i32);
@@ -81,6 +81,9 @@ struct PlayerRadius(f32);
 #[derive(Resource)]
 struct BoxColorPalette(Vec<Handle<ColorMaterial>>);
 
+#[derive(Resource, Default)]
+struct KillGrowthQueue(Vec<(Entity, i32)>);
+
 fn main() {
     App::new()
         .add_plugins((
@@ -95,10 +98,11 @@ fn main() {
             PhysicsPlugins::default().with_length_unit(20.0),
             CharacterControllerPlugin))
         .init_resource::<BoxVelocityTimer>()
+        .init_resource::<KillGrowthQueue>()
         .add_systems(Startup, (setup_camera, setup_player_stats_ui, setup_fps_ui, setup_box_count_ui))
         .add_systems(Startup, setup_box_color_palette)
         .add_systems(Startup, (add_player, spawn_boxes, spawn_floor).after(setup_box_color_palette))
-        .add_systems(Update, (update_fps_ui, update_box_count_ui, (apply_random_impulse_to_boxes, collision_damage, apply_damage_to_entity, apply_box_growth, apply_player_growth, update_entity_color_based_on_health).chain()))
+        .add_systems(Update, (follow_player_camera, update_fps_ui, update_box_count_ui, (apply_random_impulse_to_boxes, collision_damage, apply_damage_to_entity, assign_kill_growth, apply_box_growth, apply_player_growth, update_entity_color_based_on_health).chain()))
         .add_systems(PostUpdate, update_player_stats_ui)
         .run();
 }
@@ -174,7 +178,7 @@ fn add_player(
 
     commands.spawn((
         Player,
-        Name("Elaina Proctor".to_string()),
+        PlayerName("Elaina Proctor".to_string()),
         Health(BASE_PLAYER_HEALTH),
         MaxHealth(BASE_PLAYER_HEALTH),
         CollisionEventsEnabled,
@@ -221,7 +225,7 @@ fn spawn_boxes(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, palette
     }
 }
 
-fn spawn_floor(mut commands: Commands, _meshes: ResMut<Assets<Mesh>>, _materials: ResMut<Assets<ColorMaterial>>) {
+fn spawn_floor(mut commands: Commands) {
     let half = ARENA_SIZE / 2.0;
     let wall_color = Color::srgb(0.7, 0.7, 0.8);
 
@@ -291,7 +295,7 @@ fn apply_random_impulse_to_boxes(
 }
 
 fn update_player_stats_ui(
-    player_query: Query<(&Name, &Health, &MaxHealth, &Transform), With<Player>>,
+    player_query: Query<(&PlayerName, &Health, &MaxHealth, &Transform), With<Player>>,
     mut text_query: Query<&mut Text, With<PlayerStatsText>>,
 ) {
     let Ok((name, health, max_health, transform)) = player_query.single() else {
@@ -311,24 +315,6 @@ fn update_player_stats_ui(
         transform.translation.y
     );
 }
-
-/*
-fn follow_player_camera(
-    player_query: Query<&Transform, (With<Player>, Without<MainCamera>)>,
-    mut camera_query: Query<&mut Transform, (With<MainCamera>, Without<Player>)>,
-) {
-    let Ok(player_transform) = player_query.single() else {
-        return;
-    };
-
-    let Ok(mut camera_transform) = camera_query.single_mut() else {
-        return;
-    };
-
-    camera_transform.translation.x = player_transform.translation.x;
-    camera_transform.translation.y = player_transform.translation.y;
-}
-*/
 
 fn update_fps_ui(
     diagnostics: Res<DiagnosticsStore>,
@@ -350,13 +336,25 @@ fn update_fps_ui(
 }
 
 fn update_box_count_ui(
-    box_query: Query<(), With<WorldBox>>,
+    mut box_count: Local<usize>,
+    added: Query<(), Added<WorldBox>>,
+    mut removed: RemovedComponents<WorldBox>,
     mut text_query: Query<&mut Text, With<BoxCountText>>,
 ) {
+    let added_count = added.iter().count();
+    let removed_count = removed.read().count();
+
+    if added_count == 0 && removed_count == 0 {
+        return;
+    }
+
+    *box_count += added_count;
+    *box_count = box_count.saturating_sub(removed_count);
+
     let Ok(mut text) = text_query.single_mut() else {
         return;
     };
-    text.0 = format!("Boxes: {}", box_query.iter().count());
+    text.0 = format!("Boxes: {}", *box_count);
 }
 
 fn collision_damage(
@@ -365,33 +363,39 @@ fn collision_damage(
     health_query: Query<Entity, With<Health>>,
     took_damage_query: Query<&TookDamage>,
     mut commands: Commands,
+    mut damage_acc: Local<std::collections::HashMap<Entity, std::collections::HashMap<Entity, i32>>>,
 ) {
-    let mut damage_acc: std::collections::HashMap<Entity, (i32, Entity)> = std::collections::HashMap::new();
+    damage_acc.clear();
 
     for event in collision_events.read() {
         for (damager, target) in [(event.collider1, event.collider2), (event.collider2, event.collider1)] {
             if let (Ok(damage), Ok(_)) = (damage_query.get(damager), health_query.get(target)) {
-                let entry = damage_acc.entry(target).or_insert((0, damager));
-                entry.0 += damage.0 as i32;
-                entry.1 = damager;
+                *damage_acc.entry(target).or_default().entry(damager).or_insert(0) += damage.0 as i32;
             }
         }
     }
 
-    for (target, (total_damage, last_damager)) in damage_acc {
-        let existing = took_damage_query.get(target).map(|td| td.0).unwrap_or(0);
-        commands.entity(target)
-            .insert(TookDamage(existing + total_damage))
-            .insert(LastDamagedBy(last_damager));
+    for (target, damager_map) in damage_acc.iter() {
+        let total_damage: i32 = damager_map.values().sum();
+        // Kill credit goes to the entity that dealt the most cumulative damage this collision event.
+        let top_damager = damager_map.iter().max_by_key(|(_, v)| *v).map(|(&e, _)| e);
+        if let Some(top_damager) = top_damager {
+            let existing = took_damage_query.get(*target).map(|td| td.0).unwrap_or(0);
+            commands.entity(*target)
+                .insert(TookDamage(existing + total_damage))
+                .insert(LastDamagedBy(top_damager));
+        }
     }
 }
 
+/// Applies damage to all entities that took a hit this frame, despawns those
+/// that reach 0 HP, and queues growth credit for their killers.
 fn apply_damage_to_entity(
     mut commands: Commands,
     mut query: Query<(Entity, &TookDamage, &mut Health, Option<&MaxHealth>, Option<&LastDamagedBy>)>,
-    grow_query: Query<&GrowBy>,
+    mut kill_queue: ResMut<KillGrowthQueue>,
 ) {
-    let mut growth_map: std::collections::HashMap<Entity, i32> = std::collections::HashMap::new();
+    kill_queue.0.clear();
     let mut dying: std::collections::HashSet<Entity> = std::collections::HashSet::new();
 
     for (entity, took_damage, mut health, max_health, last_damaged_by) in &mut query {
@@ -399,20 +403,27 @@ fn apply_damage_to_entity(
         commands.entity(entity).remove::<TookDamage>().remove::<LastDamagedBy>();
         if health.0 <= 0 {
             if let (Some(MaxHealth(pool)), Some(LastDamagedBy(killer))) = (max_health, last_damaged_by) {
-                *growth_map.entry(*killer).or_insert(0) += pool;
+                kill_queue.0.push((*killer, *pool));
             }
             dying.insert(entity);
             commands.entity(entity).despawn();
         }
     }
 
-    for (killer, absorbed_pool) in growth_map {
-        if dying.contains(&killer) {
-            continue;
-        }
+    // Drop credit for killers that also died this frame.
+    kill_queue.0.retain(|(killer, _)| !dying.contains(killer));
+}
+
+/// Distributes growth (absorbed HP pool) from `kill_queue` to the winning killers.
+fn assign_kill_growth(
+    mut commands: Commands,
+    kill_queue: Res<KillGrowthQueue>,
+    grow_query: Query<&GrowBy>,
+) {
+    for &(killer, pool) in &kill_queue.0 {
         if let Ok(mut ec) = commands.get_entity(killer) {
             let existing = grow_query.get(killer).map(|g| g.0).unwrap_or(0);
-            ec.insert(GrowBy(existing + absorbed_pool));
+            ec.insert(GrowBy(existing + pool));
         }
     }
 }
@@ -463,7 +474,7 @@ fn apply_player_growth(
 
 fn update_entity_color_based_on_health(
     mut params: ParamSet<(
-        Query<(&Health, &MaxHealth, &mut MeshMaterial2d<ColorMaterial>), With<WorldBox>>,
+        Query<(&Health, &MaxHealth, &mut MeshMaterial2d<ColorMaterial>), (With<WorldBox>, Changed<Health>)>,
         Query<(&Health, &MaxHealth, &MeshMaterial2d<ColorMaterial>), With<Player>>,
     )>,
     mut materials: ResMut<Assets<ColorMaterial>>,
@@ -491,4 +502,20 @@ fn setup_box_color_palette(mut commands: Commands, mut materials: ResMut<Assets<
         })
         .collect();
     commands.insert_resource(BoxColorPalette(palette));
+}
+
+fn follow_player_camera(
+    player_query: Query<&Transform, (With<Player>, Without<MainCamera>)>,
+    mut camera_query: Query<&mut Transform, (With<MainCamera>, Without<Player>)>,
+) {
+    let Ok(player_transform) = player_query.single() else {
+        return;
+    };
+
+    let Ok(mut camera_transform) = camera_query.single_mut() else {
+        return;
+    };
+
+    camera_transform.translation.x = player_transform.translation.x;
+    //camera_transform.translation.y = player_transform.translation.y;
 }
