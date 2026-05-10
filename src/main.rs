@@ -11,9 +11,8 @@ const PLAYER_START: Vec3 = Vec3::ZERO;
 const BASE_PLAYER_HEALTH: i32 = 32; // surface area in units² (π·r²)
 const PLAYER_JUMP_IMPULSE: f32 = 120.0;
 const PLAYER_GRAVITY_SCALE: f32 = 4.0;
-const BOX_COUNT: usize = 5000;
+const BOX_COUNT: usize = 30000;
 const BASE_BOX_HEALTH: i32 = 16; // surface area in units² (side²)
-const BOX_SPAWN_RADIUS: f32 = 500.0;
 const BOX_RESTITUTION: f32 = 0.7;
 const FLOOR_RESTITUTION: f32 = 0.7;
 const COLOR_PALETTE_STEPS: usize = 20;
@@ -26,7 +25,8 @@ const PLAYER_COLLIDER_DENSITY: f32 = 2.0;
 const BOX_IMPULSE_MIN_INTERVAL: f32 = 1.0;
 const BOX_IMPULSE_MAX_INTERVAL: f32 = 5.0;
 const BOX_IMPULSE_SPEED: f32 = 100.0;
-const ARENA_SIZE: f32 = 1000.0;
+const ARENA_WIDTH: f32 = 10000.0;
+const ARENA_HEIGHT: f32 = 1000.0;
 const ARENA_WALL_THICKNESS: f32 = 10.0;
 
 #[derive(Component)]
@@ -75,7 +75,7 @@ struct MaxHealth(i32);
 struct PlayerRadius(f32);
 
 /// Pre-built palette of `COLOR_PALETTE_STEPS + 1` materials ranging from
-/// red (index 0, 0 HP) to yellow (last index, full HP). Boxes swap to the
+/// black (index 0, 0 HP) to yellow (last index, full HP). Boxes swap to the
 /// nearest handle so Bevy can batch all boxes in the same bucket into a
 /// single draw call — equivalent to UE5 material instances.
 #[derive(Resource)]
@@ -172,7 +172,7 @@ fn add_player(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    let player_material = materials.add(Color::srgb(0.2, 0.7, 0.9));
+    let player_material = materials.add(Color::srgb(0.0, 1.0, 0.0));
     let player_radius = (BASE_PLAYER_HEALTH as f32 / std::f32::consts::PI).sqrt();
     let player_mesh = meshes.add(Circle::new(player_radius));
 
@@ -201,11 +201,14 @@ fn spawn_boxes(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, palette
     let full_health_mat = palette.0[COLOR_PALETTE_STEPS].clone();
     let mut rng = rand::thread_rng();
 
-    for _ in 0..BOX_COUNT {
-        let offset = Vec2::new(
-            rng.gen_range(-BOX_SPAWN_RADIUS..BOX_SPAWN_RADIUS),
-            rng.gen_range(-BOX_SPAWN_RADIUS..BOX_SPAWN_RADIUS),
-        );
+    let spawn_half_w = ARENA_WIDTH / 2.0 - ARENA_WALL_THICKNESS - box_size / 2.0;
+    let spawn_half_h = ARENA_HEIGHT / 2.0 - ARENA_WALL_THICKNESS - box_size / 2.0;
+
+    let slot_width = (2.0 * spawn_half_w) / BOX_COUNT as f32;
+
+    for i in 0..BOX_COUNT {
+        let x = -spawn_half_w + (i as f32 + 0.5) * slot_width;
+        let offset = Vec2::new(x, rng.gen_range(-spawn_half_h..spawn_half_h));
 
         commands.spawn((
             WorldBox,
@@ -226,42 +229,43 @@ fn spawn_boxes(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, palette
 }
 
 fn spawn_floor(mut commands: Commands) {
-    let half = ARENA_SIZE / 2.0;
+    let half_w = ARENA_WIDTH / 2.0;
+    let half_h = ARENA_HEIGHT / 2.0;
     let wall_color = Color::srgb(0.7, 0.7, 0.8);
 
     // Bottom
     commands.spawn((
-        Sprite { color: wall_color, custom_size: Some(Vec2::new(ARENA_SIZE, ARENA_WALL_THICKNESS)), ..default() },
-        Transform::from_xyz(0.0, -half, 0.0),
+        Sprite { color: wall_color, custom_size: Some(Vec2::new(ARENA_WIDTH, ARENA_WALL_THICKNESS)), ..default() },
+        Transform::from_xyz(0.0, -half_h, 0.0),
         RigidBody::Static,
-        Collider::rectangle(ARENA_SIZE, ARENA_WALL_THICKNESS),
+        Collider::rectangle(ARENA_WIDTH, ARENA_WALL_THICKNESS),
         Restitution::new(FLOOR_RESTITUTION).with_combine_rule(CoefficientCombine::Max),
     ));
 
     // Top
     commands.spawn((
-        Sprite { color: wall_color, custom_size: Some(Vec2::new(ARENA_SIZE, ARENA_WALL_THICKNESS)), ..default() },
-        Transform::from_xyz(0.0, half, 0.0),
+        Sprite { color: wall_color, custom_size: Some(Vec2::new(ARENA_WIDTH, ARENA_WALL_THICKNESS)), ..default() },
+        Transform::from_xyz(0.0, half_h, 0.0),
         RigidBody::Static,
-        Collider::rectangle(ARENA_SIZE, ARENA_WALL_THICKNESS),
+        Collider::rectangle(ARENA_WIDTH, ARENA_WALL_THICKNESS),
         Restitution::new(FLOOR_RESTITUTION).with_combine_rule(CoefficientCombine::Max),
     ));
 
     // Right
     commands.spawn((
-        Sprite { color: wall_color, custom_size: Some(Vec2::new(ARENA_WALL_THICKNESS, ARENA_SIZE)), ..default() },
-        Transform::from_xyz(half, 0.0, 0.0),
+        Sprite { color: wall_color, custom_size: Some(Vec2::new(ARENA_WALL_THICKNESS, ARENA_HEIGHT)), ..default() },
+        Transform::from_xyz(half_w, 0.0, 0.0),
         RigidBody::Static,
-        Collider::rectangle(ARENA_WALL_THICKNESS, ARENA_SIZE),
+        Collider::rectangle(ARENA_WALL_THICKNESS, ARENA_HEIGHT),
         Restitution::new(FLOOR_RESTITUTION).with_combine_rule(CoefficientCombine::Max),
     ));
 
     // Left
     commands.spawn((
-        Sprite { color: wall_color, custom_size: Some(Vec2::new(ARENA_WALL_THICKNESS, ARENA_SIZE)), ..default() },
-        Transform::from_xyz(-half, 0.0, 0.0),
+        Sprite { color: wall_color, custom_size: Some(Vec2::new(ARENA_WALL_THICKNESS, ARENA_HEIGHT)), ..default() },
+        Transform::from_xyz(-half_w, 0.0, 0.0),
         RigidBody::Static,
-        Collider::rectangle(ARENA_WALL_THICKNESS, ARENA_SIZE),
+        Collider::rectangle(ARENA_WALL_THICKNESS, ARENA_HEIGHT),
         Restitution::new(FLOOR_RESTITUTION).with_combine_rule(CoefficientCombine::Max),
     ));
 }
@@ -489,7 +493,8 @@ fn update_entity_color_based_on_health(
     for (health, max_health, material_handle) in &params.p1() {
         if let Some(material) = materials.get_mut(material_handle) {
             let health_ratio = (health.0 as f32 / max_health.0 as f32).clamp(0.0, 1.0);
-            material.color = Color::srgb(1.0 - health_ratio, health_ratio, 0.0);
+            // full HP → green, 0 HP → black
+            material.color = Color::srgb(0.0, health_ratio, 0.0);
         }
     }
 }
@@ -498,7 +503,8 @@ fn setup_box_color_palette(mut commands: Commands, mut materials: ResMut<Assets<
     let palette = (0..=COLOR_PALETTE_STEPS)
         .map(|i| {
             let t = i as f32 / COLOR_PALETTE_STEPS as f32;
-            materials.add(Color::srgb(1.0, t, 0.0))
+            // t=0 → black (dead), t=1 → yellow (full HP)
+            materials.add(Color::srgb(t, t, 0.0))
         })
         .collect();
     commands.insert_resource(BoxColorPalette(palette));
